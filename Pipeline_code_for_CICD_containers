@@ -1,0 +1,101 @@
+pipeline {
+    agent any
+	tools {
+        maven "maven3"
+    }
+
+    environment {
+        registry = "<dockerhub-account-id>/<app-name>"
+        registryCredentials = "dockerhubcreds"
+    }
+
+    stages{
+        stage('Building the artifact'){
+            steps {
+                sh 'mvn clean install'
+            }
+            post {
+                success {
+                    echo 'Archiving the artifact after successful generation'
+                    archiveArtifacts artifacts: '**/target/*.war'
+                }
+            }
+        }
+
+        stage('Unit Testing'){
+            steps {
+                sh 'mvn test'
+            }
+        }
+
+        stage ('Checkstyle Analysis'){
+            steps {
+                sh 'mvn checkstyle:checkstyle'
+            }
+            post {
+                success {
+                    echo 'Successfully generated the check style analysis report'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+
+            environment {
+                scanner = tool '<tool name as per Jenkins>'
+            }
+
+            steps {
+                withSonarQubeEnv('sonar-pro') {
+                    sh '''${scanner}/bin/sonar-scanner -Dsonar.projectKey=<app-name> \
+                   -Dsonar.projectName=<project-name> \
+                   -Dsonar.projectVersion=1.0 \
+                   -Dsonar.sources=src/ \
+                   -Dsonar.java.binaries=folder/morefolders/account/ \
+                   -Dsonar.junit.reportsPath=folder/reports/ \
+                   -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+                   -Dsonar.java.checkstyle.reportPaths=folder/checkstyle-result.xml'''
+                }
+
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        stage ('Building Docker image') {
+          steps {
+            script {
+              dockerImage = docker.build registry + ":V$BUILD_NUMBER"
+            }
+
+          }
+        }
+
+        stage ('upload image to docker hub') {
+          steps {
+            script {
+              docker.withRegistry('',registryCredentials) {
+                dockerImage.push("V$BUILD_NUMBER")
+                dockerImage.push('latest')
+
+              }
+            }
+          }
+        }
+
+        stage('remove the unused docker images') {
+          steps {
+            sh "docker rmi $registry:V$BUILD_NUMBER"
+          }
+        }
+        
+        stage ('Kubernetes deploy') {
+          agent { label 'KOPS'}
+          steps {
+              sh "helm upgrade --install --force <app-stack> helm/<app-charts> --set appimage=${registry}:V$(BUILD_NUMBER) --namespace <prod>"
+          }
+        }
+
+
+    }
+}
